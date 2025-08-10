@@ -18,7 +18,7 @@ from models.ema import ExponentialMovingAverage
 # for radon
 from physics.ct import CT
 from sampling import LangevinCorrector, ReverseDiffusionPredictor
-from sde_lib import VESDE
+from sde_lib import DDPM, VESDE
 from utils import (
     batchfy,
     clear,
@@ -32,7 +32,7 @@ from utils import (
 ###############################################
 problem = "sparseview_CT_ADMM_TV_total"
 config_name = "AAPM_256_ncsnpp_continuous"
-sde = "VESDE"
+sde = "ddpm"
 num_scales = 2000
 ckpt_num = 185
 N = num_scales
@@ -62,6 +62,8 @@ if sde.lower() == "vesde":
     )
     sde.N = N
     sampling_eps = 1e-5
+elif sde.lower() == "ddpm":
+    sde = DDPM()
 predictor = ReverseDiffusionPredictor
 corrector = LangevinCorrector
 probability_flow = False

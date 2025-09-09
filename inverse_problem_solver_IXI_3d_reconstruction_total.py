@@ -1,15 +1,30 @@
 import os
+
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from generative.networks.nets import DiffusionModelUNet
+from monai.data import MetaTensor
+from monai.transforms import (
+    Compose,
+    CropForegroundd,
+    EnsureChannelFirstd,
+    Lambda,
+    LoadImage,
+    LoadImaged,
+    SaveImage,
+    ScaleIntensityRangePercentilesd,
+)
 from torch._C import device
 from tqdm import tqdm
 
 import controllable_generation_TV
 import datasets
+from guided_diffusion.unet import create_my_model
 from losses import get_optimizer
 from models import ncsnpp
 from models import utils as mutils
@@ -17,8 +32,12 @@ from models.ema import ExponentialMovingAverage
 
 # for radon
 from physics.ct import CT
-from sampling import LangevinCorrector, ReverseDiffusionPredictor
-from sde_lib import DDPM, VESDE
+from sampling import (
+    AncestralSamplingPredictor,
+    LangevinCorrector,
+    ReverseDiffusionPredictor,
+)
+from sde_lib import DDPM, VESDE, VPSDE
 from utils import (
     batchfy,
     clear,
@@ -27,18 +46,31 @@ from utils import (
     restore_checkpoint,
 )
 
+loader = LoadImage(ensure_channel_first=True)
+
 ###############################################
 # Configurations
 ###############################################
-problem = "sparseview_CT_ADMM_TV_total"
-config_name = "AAPM_256_ncsnpp_continuous"
-sde = "ddpm"
-num_scales = 2000
+factor = 2
+problem = "MRI_through_plane_SR_ADMM_TV_total"
+config_name = "IXI_256_ncsnpp_continuous"
+sde = "vpsde"
+num_scales = 50
 ckpt_num = 185
 N = num_scales
+niter = 20
+n_inner = 20
 
-vol_name = "L067"
-root = Path(f"./data/CT/ind/256_sorted/{vol_name}")
+vol_name = "IXI002-Guys-0828"
+seq = "T2"
+root = Path(
+    f"/root/aicp-data/IXI_downsampledx{int(factor)}_iacl/{vol_name}/{seq}.nii.gz"
+)
+gpu = 0
+# Device setting
+device_str = f"cuda:{gpu}" if torch.cuda.is_available() else "cpu"
+print(f"Device set to {device_str}.")
+device = torch.device(device_str)
 
 # Parameters for the inverse problem
 Nview = 8
@@ -63,8 +95,23 @@ if sde.lower() == "vesde":
     sde.N = N
     sampling_eps = 1e-5
 elif sde.lower() == "ddpm":
-    sde = DDPM()
-predictor = ReverseDiffusionPredictor
+    config_name += "_ddpm"
+    from configs.ddpm import IXI_256_ncsnpp_continuous as configs
+
+    config = configs.get_config()
+    config.model.num_scales = N
+    sde = DDPM(N=num_scales, beta_start=1e-4, beta_end=2e-2)
+
+elif sde.lower() == "vpsde":
+    config_name += "_vpsde"
+    from configs.ddpm import IXI_256_ncsnpp_continuous as configs
+
+    config = configs.get_config()
+    sde = VPSDE(beta_min=0.1, beta_max=20, N=1000)
+    sde.N = N
+
+# predictor = ReverseDiffusionPredictor
+predictor = AncestralSamplingPredictor
 corrector = LangevinCorrector
 probability_flow = False
 snr = 0.16
@@ -78,22 +125,31 @@ random_seed = 0
 sigmas = mutils.get_sigmas(config)
 scaler = datasets.get_data_scaler(config)
 inverse_scaler = datasets.get_data_inverse_scaler(config)
-score_model = mutils.create_model(config)  ## model
+# -------------score_model----------------
+# score_model = mutils.create_model(config)
+ckpt_dir = "/home/czfy/diffusion-posterior-sampling/model64"
+score_model = create_my_model(f"{ckpt_dir}/{seq}_best_metric_model.pth")
+score_model = score_model.to(device)
+score_model.eval()
+# -------------score_model----------------
 
-optimizer = get_optimizer(config, score_model.parameters())
-ema = ExponentialMovingAverage(score_model.parameters(), decay=config.model.ema_rate)
-state = dict(step=0, optimizer=optimizer, model=score_model, ema=ema)
+# -------------EMA----------------
+# optimizer = get_optimizer(config, score_model.parameters())
+# ema = ExponentialMovingAverage(score_model.parameters(), decay=config.model.ema_rate)
+# state = dict(step=0, optimizer=optimizer, model=score_model, ema=ema)
 
-state = restore_checkpoint(
-    ckpt_filename, state, config.device, skip_sigma=True, skip_optimizer=True
-)
-ema.copy_to(score_model.parameters())
-
+# state = restore_checkpoint(
+#     ckpt_filename, state, config.device, skip_sigma=True, skip_optimizer=True
+# )
+# ema.copy_to(score_model.parameters())
+# -------------EMA----------------
 # Specify save directory for saving generated samples
-save_root = Path(f"./results/{config_name}/{problem}/m{Nview}/rho{rho}/lambda{lamb}")
+save_root = Path(
+    f"./results/{config_name}/{problem}/m{Nview}/rho{rho}/lambda{lamb}/AncestralSamplingPredictor/N{N}_noFinalConsistency_NewDzDzT_NewAAT_Finterpolate_niter{niter}_ninner{n_inner}"
+)
 save_root.mkdir(parents=True, exist_ok=True)
 
-irl_types = ["input", "recon", "label", "BP", "sinogram"]
+irl_types = ["input", "recon", "label", "BP"]
 for t in irl_types:
     if t == "recon":
         save_root_f = save_root / t / "progress"
@@ -102,35 +158,49 @@ for t in irl_types:
         save_root_f = save_root / t
         save_root_f.mkdir(parents=True, exist_ok=True)
 
-# read all data
-fname_list = os.listdir(root)
-fname_list = sorted(fname_list, key=lambda x: float(x.split(".")[0]))
-print(fname_list)
-all_img = []
+# -------------read all data-------------
+transforms = Compose(
+    [
+        LoadImaged(keys=["image"]),
+        EnsureChannelFirstd(keys=["image"]),
+        ScaleIntensityRangePercentilesd(
+            keys=["image"], lower=0.1, upper=99.9, b_min=0.0, b_max=1.0, clip=False
+        ),
+        Lambda(func=lambda x: x["image"]),
+    ]
+)
 
-print("Loading all data")
-for fname in tqdm(fname_list):
-    just_name = fname.split(".")[0]
-    img = torch.from_numpy(np.load(os.path.join(root, fname), allow_pickle=True))
-    h, w = img.shape
-    img = img.view(1, 1, h, w)
-    all_img.append(img)
-    plt.imsave(
-        os.path.join(save_root, "label", f"{just_name}.png"), clear(img), cmap="gray"
-    )
-all_img = torch.cat(all_img, dim=0)
+all_img = transforms({"image": str(root).replace(".nii.gz", "_gt.nii.gz")})
+degraded_img = transforms({"image": root})
+if seq == "T2":
+    all_img = all_img.permute(3, 0, 1, 2)
+    degraded_img = degraded_img.permute(3, 0, 1, 2)
+else:
+    all_img = all_img.permute(1, 0, 2, 3)
+    degraded_img = degraded_img.permute(1, 0, 2, 3)
+# fname_list = os.listdir(root)
+# fname_list = sorted(fname_list, key=lambda x: float(x.split(".")[0]))
+# print(fname_list)
+# all_img = []
+
+# print("Loading data")
+# for fname in tqdm(fname_list):
+#     just_name = fname.split(".")[0]
+#     img = torch.from_numpy(np.load(os.path.join(root, fname), allow_pickle=True))
+#     h, w = img.shape
+#     img = img.view(1, 1, h, w)
+#     all_img.append(img)
+#     plt.imsave(
+#         os.path.join(save_root, "label", f"{just_name}.png"), clear(img), cmap="gray"
+#     )
+# all_img = torch.cat(all_img, dim=0)
+
+
 print(f"Data loaded shape : {all_img.shape}")
-
-# full
-angles = np.linspace(0, np.pi, 180, endpoint=False)
-radon = CT(img_width=h, radon_view=Nview, circle=False, device=config.device)
-
-predicted_sinogram = []
-label_sinogram = []
-img_cache = None
-
 img = all_img.to(config.device)
-pc_radon = controllable_generation_TV.get_pc_radon_ADMM_TV_vol(
+degraded_img = degraded_img.to(config.device)
+# -------------read all data-------------
+pc_radon, AT = controllable_generation_TV.get_pc_SR_ADMM_TV_vol(
     sde,
     predictor,
     corrector,
@@ -138,40 +208,47 @@ pc_radon = controllable_generation_TV.get_pc_radon_ADMM_TV_vol(
     snr=snr,
     n_steps=n_steps,
     probability_flow=probability_flow,
-    continuous=config.training.continuous,
+    continuous=False,
     denoise=True,
-    radon=radon,
     save_progress=True,
     save_root=save_root,
-    final_consistency=True,
+    final_consistency=False,
     img_shape=img.shape,
     lamb_1=lamb,
     rho=rho,
+    factor=factor,
+    niter=niter,
+    n_inner=n_inner,
 )
 # Sparse by masking
-sinogram = radon.A(img)
-
+# sinogram = radon.A(img)
+sinogram = degraded_img
 # A_dagger
-bp = radon.AT(sinogram)
+bp = AT(sinogram)
 
 # Recon Image
 x = pc_radon(score_model, scaler(img), measurement=sinogram)
 img_cahce = x[-1].unsqueeze(0)
 
 count = 0
+# save 3d volume
+if seq == "T2":
+    # recon_nii = x.permute(3, 0, 1, 2) # [C,H,W,D] → [D,C,H,W]
+    recon_nii = x.permute(1, 2, 3, 0)  # [D,C,H,W] → [C,H,W,D]
+    # degraded_img = degraded_img.permute(3, 0, 1, 2)
+else:
+    # recon_nii = x.permute(1, 0, 2, 3) # [C,H,W,D] → [H,C,W,D]
+    recon_nii = x.permute(1, 0, 2, 3)  # [H,C,W,D] → [C,H,W,D]
+    # degraded_img = degraded_img.permute(1, 0, 2, 3)
+saver = SaveImage()
+saver(
+    MetaTensor(recon_nii, affine=all_img.affine, meta=all_img.meta),
+    filename=save_root / f"{save_root.name}.nii.gz",
+)
+# save 2d slices
 for i, recon_img in enumerate(x):
     plt.imsave(save_root / "BP" / f"{count}.png", clear(bp[i]), cmap="gray")
     plt.imsave(save_root / "label" / f"{count}.png", clear(img[i]), cmap="gray")
     plt.imsave(save_root / "recon" / f"{count}.png", clear(recon_img), cmap="gray")
 
     count += 1
-
-# Recon and Save Sinogram
-label_sinogram.append(radon.A_all(img))
-predicted_sinogram.append(radon.A_all(x))
-
-original_sinogram = torch.cat(label_sinogram, dim=0).detach().cpu().numpy()
-recon_sinogram = torch.cat(predicted_sinogram, dim=0).detach().cpu().numpy()
-
-np.save(str(save_root / "sinogram" / f"original_{count}.npy"), original_sinogram)
-np.save(str(save_root / "sinogram" / f"recon_{count}.npy"), recon_sinogram)

@@ -1,9 +1,11 @@
 import functools
 import time
+from logging import fatal
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 from numpy.testing._private.utils import measure
 from tqdm import tqdm
 
@@ -53,6 +55,27 @@ class lambda_schedule_const(lambda_schedule):
 
     def get_current_lambda(self, i):
         return self.lamb
+
+
+def _Dz_nonperiodic(x):
+    # x: shape (Z, C, H, W) or (Z, ...)
+    y = torch.zeros_like(x)
+    # forward difference for i=0..n-2
+    y[:-1] = x[1:] - x[:-1]
+    # last slice difference = 0 (or you can set x[-1] - x[-2] if prefer)
+    y[-1].zero_()
+    return y
+
+
+def _DzT_nonperiodic(v):
+    # v: same shape as _Dz output
+    out = torch.zeros_like(v)
+    # out[0] = -v[0]
+    # out[1..n-2] = v[0..n-3] - v[1..n-2]
+    # out[n-1] = v[n-2]
+    out[:-1] += -v[:-1]  # out[0..n-2] += -v[0..n-2]
+    out[1:] += v[:-1]  # out[1..n-1] += v[0..n-2]
+    return out
 
 
 def _Dz(x):  # Batch direction
@@ -420,6 +443,208 @@ def get_pc_radon_ADMM_TV_vol(
             return inverse_scaler(x_mean if denoise else x)
 
     return pc_radon
+
+
+def get_pc_SR_ADMM_TV_vol(
+    sde,
+    predictor,
+    corrector,
+    inverse_scaler,
+    snr,
+    n_steps=1,
+    probability_flow=False,
+    continuous=False,
+    denoise=True,
+    eps=1e-5,
+    save_progress=False,
+    save_root=None,
+    final_consistency=False,
+    img_shape=None,
+    lamb_1=5,
+    rho=10,
+    factor=2,
+    niter=1,
+    n_inner=1,
+):
+    """Sparse application of measurement consistency"""
+    # Define predictor & corrector
+    predictor_update_fn = functools.partial(
+        shared_predictor_update_fn,
+        sde=sde,
+        predictor=predictor,
+        probability_flow=probability_flow,
+        continuous=continuous,
+    )
+    corrector_update_fn = functools.partial(
+        shared_corrector_update_fn,
+        sde=sde,
+        corrector=corrector,
+        continuous=continuous,
+        snr=snr,
+        n_steps=n_steps,
+    )
+
+    del_z = torch.zeros(img_shape)
+    udel_z = torch.zeros(img_shape)
+    eps = 1e-10
+
+    def _A(x):
+        # return radon.A(x)
+        # return F.interpolate(
+        #     x, scale_factor=factor, mode="nearest", align_corners=False
+        # )
+        indices = torch.arange(0, x.size(0), factor, device=x.device, dtype=torch.long)
+        return x.index_select(0, indices)
+
+    def _AT(y: torch.Tensor):
+        # y: [Nsamp, C, H, W] or general [...], factor from outer scope
+        # target_shape = (y.shape[0] * factor, *y.shape[1:])  # tuple of ints, safe
+        # [Nsamp, C, H, W] → [1,C,Nsamp,H,W]
+        _y = y.permute(1, 0, 2, 3).unsqueeze(0).contiguous()
+        x_hr = F.interpolate(
+            _y,
+            size=(img_shape[0], _y.shape[-2], _y.shape[-1]),
+            mode="trilinear",
+            align_corners=True,
+        )
+        return x_hr.squeeze(0).permute(1, 0, 2, 3).contiguous()
+        # target_shape = img_shape
+        # x_hr = torch.zeros(target_shape, device=y.device, dtype=y.dtype)
+        # indices = torch.arange(
+        #     0, target_shape[0], factor, device=y.device, dtype=torch.long
+        # )
+        # x_hr.index_copy_(0, indices, y)
+        # return x_hr
+
+        # return x_hr
+
+    def kaczmarz(x, x_mean, measurement=None, lamb=1.0, i=None, norm_const=None):
+        eps_k = 1e-10
+        indices = torch.arange(0, x.size(0), factor, device=x.device, dtype=torch.long)
+        Ax = _A(x)  # size == measurement.shape
+        res = measurement - Ax
+        # 更新仅针对被采样的 slices
+        x_s = x.index_select(0, indices)
+        x_s = x_s + lamb * (res / (norm_const.index_select(0, indices) + eps_k))
+        x.index_copy_(0, indices, x_s)
+
+        # x = x + lamb * _AT(measurement - _A(x)) / norm_const
+        x_mean = x
+        return x, x_mean
+
+    def A_cg(x):
+        # return _AT(_A(x)) + rho * _DzT(_Dz(x))
+        return _AT(_A(x)) + rho * _DzT_nonperiodic(_Dz_nonperiodic(x))
+
+    def CG(A_fn, b_cg, x, n_inner=10):
+        r = b_cg - A_fn(x)
+        p = r
+        rs_old = torch.matmul(r.view(1, -1), r.view(1, -1).T)
+
+        for i in range(n_inner):
+            Ap = A_fn(p)
+            a = rs_old / torch.matmul(p.view(1, -1), Ap.view(1, -1).T)
+
+            x += a * p
+            r -= a * Ap
+
+            rs_new = torch.matmul(r.view(1, -1), r.view(1, -1).T)
+            if torch.sqrt(rs_new) < eps:
+                break
+            p = r + (rs_new / rs_old) * p
+            rs_old = rs_new
+        return x
+
+    def CS_routine(x, ATy, niter=20, n_inner=1):
+        nonlocal del_z, udel_z
+        if del_z.device != x.device:
+            del_z = del_z.to(x.device)
+            udel_z = del_z.to(x.device)
+        for i in range(niter):
+            # b_cg = ATy + rho * (_DzT(del_z) - _DzT(udel_z))
+            b_cg = ATy + rho * (_DzT_nonperiodic(del_z) - _DzT_nonperiodic(udel_z))
+            x = CG(A_cg, b_cg, x, n_inner=n_inner)
+
+            # del_z = shrink(_Dz(x) + udel_z, lamb_1 / rho)
+            del_z = shrink(_Dz_nonperiodic(x) + udel_z, lamb_1 / rho)
+            # udel_z = _Dz(x) - del_z + udel_z
+            udel_z = _Dz_nonperiodic(x) - del_z + udel_z
+        x_mean = x
+        return x, x_mean
+
+    def get_update_fn(update_fn):
+        def radon_update_fn(model, data, x, t):
+            with torch.no_grad():
+                vec_t = torch.ones(x.shape[0], device=x.device) * t
+                x, x_mean = update_fn(x, vec_t, model=model)
+                return x, x_mean
+
+        return radon_update_fn
+
+    def get_ADMM_TV_fn(niter, n_inner):
+        def ADMM_TV_fn(x, measurement=None):
+            with torch.no_grad():
+                ATy = _AT(measurement)
+                x, x_mean = CS_routine(x, ATy, niter=niter, n_inner=n_inner)
+                return x, x_mean
+
+        return ADMM_TV_fn
+
+    predictor_denoise_update_fn = get_update_fn(predictor_update_fn)
+    corrector_denoise_update_fn = get_update_fn(corrector_update_fn)
+    mc_update_fn = get_ADMM_TV_fn(niter, n_inner)
+
+    def pc_radon(model, data, measurement=None):
+        with torch.no_grad():
+            x = sde.prior_sampling(data.shape).to(data.device)
+
+            ones = torch.ones_like(x).to(data.device)
+            norm_const = _AT(_A(ones))
+            timesteps = torch.linspace(sde.T, eps, sde.N)
+            for i in tqdm(range(sde.N)):
+                t = timesteps[i]
+                # 1. batchify into sizes that fit into the GPU
+                x_batch = batchfy(x, 6)
+                # 2. Run PC step for each batch
+                x_agg = list()
+                for idx, x_batch_sing in enumerate(x_batch):
+                    x_batch_sing, _ = predictor_denoise_update_fn(
+                        model, data, x_batch_sing, t
+                    )
+                    x_batch_sing, _ = corrector_denoise_update_fn(
+                        model, data, x_batch_sing, t
+                    )
+                    x_agg.append(x_batch_sing)
+                # 3. Aggregate to run ADMM TV
+                x = torch.cat(x_agg, dim=0)
+                # 4. Run ADMM TV
+                x, x_mean = mc_update_fn(x, measurement=measurement)
+                if i == 48:
+                    pass
+                if save_progress:
+                    if (i % 1) == 0:
+                        print(f"iter: {i}/{sde.N}")
+                        plt.imsave(
+                            save_root / "recon" / "progress" / f"progress{i}.png",
+                            clear(x_mean[20:21]),
+                            cmap="gray",
+                        )
+                        plt.imsave(
+                            save_root
+                            / "recon"
+                            / "progress"
+                            / f"progress{i}_Adjacency.png",
+                            clear(x_mean[21:22]),
+                            cmap="gray",
+                        )
+            # Final step which coerces the data fidelity error term to be zero,
+            # and thereby satisfying Ax = y
+            if final_consistency:
+                x, x_mean = kaczmarz(x, x, measurement, lamb=1.0, norm_const=norm_const)
+
+            return inverse_scaler(x_mean if denoise else x)
+
+    return pc_radon, _AT
 
 
 def get_pc_radon_ADMM_TV_all_vol(

@@ -323,7 +323,7 @@ class DDPM(SDE):
         """
         # Convert normalized time t ∈ [0,1] to actual step index
         idx = (t * (self.N - 1)).long()  # discretize t to [0, N-1]
-        beta_t = self.betas[idx]
+        beta_t = self.betas.to(idx.device)[idx]
         drift = -0.5 * beta_t[:, None, None, None] * x  # drift = -0.5 * beta(t) * x
         diffusion = torch.sqrt(beta_t)  # diffusion = sqrt(beta(t))
         return drift, diffusion
@@ -341,7 +341,7 @@ class DDPM(SDE):
             mean, std: mean and standard deviation of p_t(x|x_0).
         """
         idx = (t * (self.N - 1)).long()
-        alpha_bar_t = self.alpha_bars[idx]
+        alpha_bar_t = self.alpha_bars.to(idx.device)[idx]
         mean = torch.sqrt(alpha_bar_t)[:, None, None, None] * x
         std = torch.sqrt(1.0 - alpha_bar_t)
         return mean, std

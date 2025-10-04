@@ -1,6 +1,7 @@
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+import argparse
 import time
 from pathlib import Path
 
@@ -46,8 +47,14 @@ from utils import (
     restore_checkpoint,
 )
 
-loader = LoadImage(ensure_channel_first=True)
+parser = argparse.ArgumentParser(description="3D reconstruction")
+parser.add_argument("--M_iter", type=int, default=1, help="outer iterations")
+parser.add_argument("--K_iter", type=int, default=1, help="inner iterations")
+parser.add_argument("--lamb", type=float, default=0.04, help="lambda")
+parser.add_argument("--rho", type=float, default=10, help="rho")
+args = parser.parse_args()
 
+loader = LoadImage(ensure_channel_first=True)
 ###############################################
 # Configurations
 ###############################################
@@ -58,13 +65,18 @@ sde = "vpsde"
 num_scales = 50
 ckpt_num = 185
 N = num_scales
-niter = 20
-n_inner = 20
+M_iter = args.M_iter
+K_iter = args.K_iter
+niter = M_iter
+n_inner = K_iter
+lamb = args.lamb
+rho = args.rho
 
 vol_name = "IXI002-Guys-0828"
 seq = "T2"
 root = Path(
-    f"/root/aicp-data/IXI_downsampledx{int(factor)}_iacl/{vol_name}/{seq}.nii.gz"
+    # f"/root/aicp-data/IXI_downsampledx{int(factor)}_iacl/{vol_name}/{seq}.nii.gz"
+    f"../IXI_dataset/IXI_downsampledx{int(factor)}_iacl/{vol_name}/{seq}.nii.gz"
 )
 gpu = 0
 # Device setting
@@ -73,12 +85,10 @@ print(f"Device set to {device_str}.")
 device = torch.device(device_str)
 
 # Parameters for the inverse problem
-Nview = 8
 det_spacing = 1.0
 size = 256
 det_count = int((size * (2 * torch.ones(1)).sqrt()).ceil())
-lamb = 0.04
-rho = 10
+
 freq = 1
 
 if sde.lower() == "vesde":
@@ -127,8 +137,9 @@ scaler = datasets.get_data_scaler(config)
 inverse_scaler = datasets.get_data_inverse_scaler(config)
 # -------------score_model----------------
 # score_model = mutils.create_model(config)
-ckpt_dir = "/home/czfy/diffusion-posterior-sampling/model64"
-score_model = create_my_model(f"{ckpt_dir}/{seq}_best_metric_model.pth")
+# ckpt_dir = "/home/czfy/diffusion-posterior-sampling/model64"
+ckpt_dir = "/home/czfy/IXI_diffusion/model"
+score_model = create_my_model(f"{ckpt_dir}/{seq}_latest.pth")
 score_model = score_model.to(device)
 score_model.eval()
 # -------------score_model----------------
@@ -144,8 +155,9 @@ score_model.eval()
 # ema.copy_to(score_model.parameters())
 # -------------EMA----------------
 # Specify save directory for saving generated samples
+config_name += "_gridSearch"
 save_root = Path(
-    f"./results/{config_name}/{problem}/m{Nview}/rho{rho}/lambda{lamb}/AncestralSamplingPredictor/N{N}_noFinalConsistency_NewDzDzT_NewAAT_Finterpolate_niter{niter}_ninner{n_inner}"
+    f"./results/{config_name}/{problem}/M_iter{M_iter}/K_iter{K_iter}/rho{rho}/lambda{lamb}/AncestralSamplingPredictor/N{N}_noFinalConsistency"
 )
 save_root.mkdir(parents=True, exist_ok=True)
 
@@ -243,7 +255,7 @@ else:
 saver = SaveImage()
 saver(
     MetaTensor(recon_nii, affine=all_img.affine, meta=all_img.meta),
-    filename=save_root / f"{save_root.name}.nii.gz",
+    filename=save_root / f"{'_'.join(save_root.parts[-6:])}.nii.gz",
 )
 # save 2d slices
 for i, recon_img in enumerate(x):

@@ -17,9 +17,11 @@
 
 import numpy as np
 import torch
-from generative.networks.nets import DiffusionModelUNet
 
 import sde_lib
+
+# from generative.networks.nets import DiffusionModelUNet
+
 
 _MODELS = {}
 
@@ -99,21 +101,21 @@ def create_model(config):
     return score_model
 
 
-def create_my_model(model_path):
-    model = DiffusionModelUNet(
-        spatial_dims=2,
-        in_channels=1,
-        out_channels=1,
-        num_channels=(128, 256, 256),
-        attention_levels=(False, True, True),
-        num_res_blocks=1,
-        num_head_channels=256,
-    )
-    try:
-        model.load_state_dict(th.load(model_path, map_location="cpu"))
-    except Exception as e:
-        print(f"Got exception: {e} / Randomly initialize")
-    return model
+# def create_my_model(model_path):
+#     model = DiffusionModelUNet(
+#         spatial_dims=2,
+#         in_channels=1,
+#         out_channels=1,
+#         num_channels=(128, 256, 256),
+#         attention_levels=(False, True, True),
+#         num_res_blocks=1,
+#         num_head_channels=256,
+#     )
+#     try:
+#         model.load_state_dict(th.load(model_path, map_location="cpu"))
+#     except Exception as e:
+#         print(f"Got exception: {e} / Randomly initialize")
+#     return model
 
 
 def get_model_fn(model, train=False):

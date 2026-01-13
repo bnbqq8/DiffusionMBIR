@@ -350,61 +350,156 @@ class fastmri_knee_magpha_infer(Dataset):
         return data, str(fname)
 
 
+# def get_IXI_dataset(config, train_val):
+#     """Simple pytorch dataset for fastmri knee singlecoil dataset"""
+#     import json
+#     import os.path as osp
+
+#     from monai.data import CacheDataset, GridPatchDataset, PatchIter, ShuffleBuffer
+#     from monai.transforms import (
+#         Compose,
+#         EnsureChannelFirst,
+#         LoadImage,
+#         ResizeWithPadOrCrop,
+#         ScaleIntensityRangePercentiles,
+#         SqueezeDim,
+#     )
+
+#     patch_size = (1, None, None) if config.seq == "T1" else (None, None, 1)
+#     assert train_val in ["train", "val"], "train_val must be 'train' or 'val'"
+#     with open(config.json, "r") as f:
+#         datalist = json.load(f)
+#     data_list = [osp.join(x, f"{config.seq}_gt.nii.gz") for x in datalist[train_val]]
+
+#     transforms = Compose(
+#         [
+#             LoadImage(),
+#             EnsureChannelFirst(),
+#             ScaleIntensityRangePercentiles(
+#                 lower=0.05, upper=99.9, b_min=0.0, b_max=1.0, clip=False
+#             ),
+#         ]
+#     )
+#     volume_ds = CacheDataset(
+#         data=data_list,
+#         transform=transforms,
+#         cache_rate=1.0,
+#         num_workers=1,
+#     )
+#     patch_func = PatchIter(
+#         patch_size=patch_size,
+#         start_pos=(0, 0, 0),  # dynamic first two dimensions
+#     )
+#     patch_transform = Compose(
+#         [
+#             SqueezeDim(dim=1 if config.seq == "T1" else 3),
+#             ResizeWithPadOrCrop(
+#                 spatial_size=[config.data.image_size, config.data.image_size]
+#             ),
+#         ]
+#     )
+#     patch_ds = GridPatchDataset(
+#         data=volume_ds,
+#         patch_iter=patch_func,
+#         transform=patch_transform,
+#         with_coordinates=False,
+#     )
+#     shuffle_ds = ShuffleBuffer(patch_ds, buffer_size=256, seed=0)
+
+
+# v2 12/20/2025
 def get_IXI_dataset(config, train_val):
-    """Simple pytorch dataset for fastmri knee singlecoil dataset"""
     import json
-    import os.path as osp
 
-    from monai.data import CacheDataset, GridPatchDataset, PatchIter, ShuffleBuffer
-    from monai.transforms import (
-        Compose,
-        EnsureChannelFirst,
-        LoadImage,
-        ResizeWithPadOrCrop,
-        ScaleIntensityRangePercentiles,
-        SqueezeDim,
-    )
+    import lmdb
+    import torch
+    from torchvision.transforms import RandomCrop
 
-    patch_size = (1, None, None) if config.seq == "T1" else (None, None, 1)
-    assert train_val in ["train", "val"], "train_val must be 'train' or 'val'"
-    with open(config.json, "r") as f:
+    class MultiVolumeLMDBDataset(Dataset):
+        def __init__(self, lmdb_path, patients, transform=None):
+            self.lmdb_path = str(lmdb_path)
+            self.transform = transform
+
+            # 1. 预先扫描数据库，建立索引列表
+            self.keys = []
+            env = lmdb.open(
+                self.lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                meminit=False,
+            )
+            with env.begin(write=False) as txn:
+                cursor = txn.cursor()
+                for key, _ in cursor:
+                    key_str = key.decode("ascii")
+                    # 过滤掉不在指定患者列表中的切片
+                    if key_str.split("_")[0] not in patients:
+                        continue
+                    # 过滤掉存储 shape 的 key，只保留存储 image 的主 key
+                    if not key_str.endswith("_shape"):
+                        self.keys.append(key)
+            env.close()
+
+            self.env = None
+            self.txn = None
+
+        def _init_db(self):
+            # 多进程 DataLoader 必须在每个 worker 中重新打开 env
+            self.env = lmdb.open(
+                self.lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                meminit=False,
+            )
+            self.txn = self.env.begin(write=False)
+
+        def __len__(self):
+            return len(self.keys)
+
+        def __getitem__(self, index):
+            if self.env is None:
+                self._init_db()
+
+            key = self.keys[index]
+            shape_key = key + b"_shape"
+
+            # 1. 读取像素数据
+            byte_data = self.txn.get(key)
+            # 2. 读取 Shape 数据
+            shape_data = self.txn.get(shape_key)
+
+            # 3. 反序列化
+            # 注意：dtype 必须与你写入时一致（np.float32 或 np.uint8）
+            shape = np.frombuffer(shape_data, dtype=np.int32)
+            img = (
+                np.frombuffer(byte_data, dtype=np.float32).reshape(tuple(shape)).copy()
+            )
+
+            # 4. 转换为 Tensor 并进行必要的预处理
+            # 此时 img 的 shape 是 (H, W)，需要增加通道维 (1, H, W)
+            img = torch.from_numpy(img).unsqueeze(0)
+
+            # 5. Diffusion 训练必须的 Resize/Crop
+            # 因为不同 volume 尺寸不同，这里必须统一到训练分辨率（如 512x512）
+            if self.transform:
+                img = self.transform(img)
+
+            return img
+
+    # transforms
+    if config.data.orientation == "AX":
+        transform = None
+    else:
+        transform = RandomCrop(size=(256, 64))
+    with open(config.data.json, "r") as f:
         datalist = json.load(f)
-    data_list = [osp.join(x, f"{config.seq}_gt.nii.gz") for x in datalist[train_val]]
-
-    transforms = Compose(
-        [
-            LoadImage(),
-            EnsureChannelFirst(),
-            ScaleIntensityRangePercentiles(
-                lower=0.05, upper=99.9, b_min=0.0, b_max=1.0, clip=False
-            ),
-        ]
-    )
-    volume_ds = CacheDataset(
-        data=data_list,
-        transform=transforms,
-        cache_rate=1.0,
-        num_workers=1,
-    )
-    patch_func = PatchIter(
-        patch_size=patch_size,
-        start_pos=(0, 0, 0),  # dynamic first two dimensions
-    )
-    patch_transform = Compose(
-        [
-            SqueezeDim(dim=1 if config.seq == "T1" else 3),
-            ResizeWithPadOrCrop(
-                spatial_size=[config.data.image_size, config.data.image_size]
-            ),
-        ]
-    )
-    patch_ds = GridPatchDataset(
-        data=volume_ds,
-        patch_iter=patch_func,
-        transform=patch_transform,
-        with_coordinates=False,
-    )
-    shuffle_ds = ShuffleBuffer(patch_ds, buffer_size=256, seed=0)
+    patients = [i.split("/")[-1] for i in datalist[train_val]]
+    seq = config.data.seq
+    orientation = config.data.orientation
+    lmdb_path = Path(f"../IXI_dataset/IXI_dataset_slices/{seq}_{orientation}.lmdb")
+    return MultiVolumeLMDBDataset(lmdb_path, patients, transform=transform)
 
 
 def create_dataloader(configs, evaluation=False, sort=True):
@@ -454,7 +549,7 @@ def create_dataloader(configs, evaluation=False, sort=True):
         )
     elif configs.data.dataset == "IXI":
         train_dataset = get_IXI_dataset(configs, "train")
-        val_dataset = get_IXI_dataset(configs, "val")
+        val_dataset = get_IXI_dataset(configs, "validation")
     else:
         raise ValueError(f"Dataset {configs.data.dataset} not recognized.")
 

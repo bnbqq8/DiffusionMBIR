@@ -29,14 +29,14 @@ def clear(x, normalize=True):
 def restore_checkpoint(ckpt_dir, state, device, skip_sigma=False, skip_optimizer=False):
     ckpt_dir = Path(ckpt_dir)
     # import ipdb; ipdb.set_trace()
-    # ckpt = ckpt_dir / "checkpoint.pth"
-    if not ckpt_dir.exists():
+    ckpt = ckpt_dir / "checkpoint.pth"
+    if not ckpt.exists():
         logging.warning(
             f"No checkpoint found at {ckpt_dir}. " f"Returned the same state as input"
         )
         return state
     else:
-        loaded_state = torch.load(ckpt_dir, map_location=device)
+        loaded_state = torch.load(ckpt, map_location=device)
         if not skip_optimizer:
             state["optimizer"].load_state_dict(loaded_state["optimizer"])
         loaded_model_state = loaded_state["model"]
@@ -46,7 +46,7 @@ def restore_checkpoint(ckpt_dir, state, device, skip_sigma=False, skip_optimizer
         state["model"].load_state_dict(loaded_model_state, strict=False)
         state["ema"].load_state_dict(loaded_state["ema"])
         state["step"] = loaded_state["step"]
-        print(f"loaded checkpoint dir from {ckpt_dir}")
+        print(f"loaded checkpoint dir from {ckpt}")
         return state
 
 

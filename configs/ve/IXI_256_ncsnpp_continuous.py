@@ -6,8 +6,8 @@ def get_config():
     # data
     data = config.data
     data.dataset = "IXI"
-    data.json = "../IXI_diffusion/dataset_split.json"
+    data.json = "./dataset_split.json"
     data.seq = "T1"
-    data.orientation = "AX"  # AX, SA, or COR
+    data.orientation = "AX"  # AX, SAG, or COR
 
     return config

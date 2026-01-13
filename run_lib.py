@@ -18,28 +18,37 @@
 
 import gc
 import io
+import logging
 import os
 import time
 from pathlib import Path
 
 import numpy as np
-import logging
-# Keep the import below for registering all model definitions
-from models import ddpm, ncsnv2, ncsnpp, unet
-import losses
-import sampling
-from models import utils as mutils
-from models.ema import ExponentialMovingAverage
-import datasets
-#import evaluation
-import likelihood
-import sde_lib
-from absl import flags
 import torch
+from absl import flags
 from torch import nn
 from torch.utils import tensorboard
 from torchvision.utils import make_grid, save_image
-from utils import save_checkpoint, restore_checkpoint, get_mask, kspace_to_nchw, root_sum_of_squares
+
+import datasets
+
+#import evaluation
+import likelihood
+import losses
+import sampling
+import sde_lib
+
+# Keep the import below for registering all model definitions
+from models import ddpm, ncsnpp, ncsnv2, unet
+from models import utils as mutils
+from models.ema import ExponentialMovingAverage
+from utils import (
+    get_mask,
+    kspace_to_nchw,
+    restore_checkpoint,
+    root_sum_of_squares,
+    save_checkpoint,
+)
 
 FLAGS = flags.FLAGS
 
@@ -112,8 +121,12 @@ def train(config, workdir):
 
   # Building sampling functions
   if config.training.snapshot_sampling:
-    sampling_shape = (config.training.batch_size, config.data.num_channels,
-                      config.data.image_size, config.data.image_size)
+    # sampling_shape = (config.training.batch_size, config.data.num_channels,
+    #                   config.data.image_size, config.data.image_size)
+    H, W = train_dl.dataset[0].shape[-2], train_dl.dataset[0].shape[-1]
+    sampling_shape = (16,
+                      config.data.num_channels,
+                      H, W)
     sampling_fn = sampling.get_sampling_fn(config, sde, sampling_shape, inverse_scaler, sampling_eps)
 
   # In case there are multiple hosts (e.g., TPU pods), only log to host 0
@@ -144,11 +157,12 @@ def train(config, workdir):
       #   global_step = num_data * epoch + step
       #   writer.add_scalar("eval_loss", scalar_value=eval_loss.item(), global_step=global_step)
 
-    # Save a checkpoint for every epoch
-    save_checkpoint(checkpoint_dir, state, name=f'checkpoint_{epoch}.pth')
+    # Save a checkpoint for every 10 epochs
+    if epoch % 10 == 0 or epoch == config.training.epochs - 1:
+      save_checkpoint(checkpoint_dir, state, name=f'checkpoint_{epoch}.pth')
 
-    # Generate and save samples for every epoch
-    if config.training.snapshot_sampling:
+    # Generate and save samples for every 10 epoch
+    if config.training.snapshot_sampling and (epoch % 10 == 0 or epoch == config.training.epochs - 1):
       print('sampling')
       ema.store(score_model.parameters())
       ema.copy_to(score_model.parameters())

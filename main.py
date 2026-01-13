@@ -14,13 +14,12 @@
 # limitations under the License.
 
 """Training and evaluation"""
+import logging
 import os
 from pathlib import Path
 
-from absl import app
-from absl import flags
+from absl import app, flags
 from ml_collections.config_flags import config_flags
-import logging
 
 import run_lib
 
@@ -36,6 +35,7 @@ flags.mark_flags_as_required(["workdir", "config", "mode"])
 
 
 def main(argv):
+  FLAGS.workdir = FLAGS.workdir+f"_{FLAGS.config.data.seq}_{FLAGS.config.data.orientation}"
   print(FLAGS.config)
   if FLAGS.mode == "train" or FLAGS.mode == "train_regression":
     # Create the working directory

@@ -136,7 +136,7 @@ def train(config, workdir):
     print('=================================================')
     print(f'Epoch: {epoch}')
     print('=================================================')
-
+    # Training
     for step, batch in enumerate(train_dl, start=1):
       batch = scaler(batch.to(config.device))
       # (b, 1, 320, 320, 2) --> (b, 2, 320, 320)
@@ -149,20 +149,24 @@ def train(config, workdir):
         writer.add_scalar("training_loss", scalar_value=loss, global_step=global_step)
       if step != 0 and step % config.training.snapshot_freq_for_preemption == 0:
         save_checkpoint(checkpoint_meta_dir, state)
-      # Report the loss on an evaluation dataset periodically
-      # if step % config.training.eval_freq == 0:
-      #   eval_batch = scaler(next(iter(eval_dl)).to(config.device))
-      #   eval_loss = eval_step_fn(state, eval_batch)
-      #   logging.info("step: %d, eval_loss: %.5e" % (step, eval_loss.item()))
-      #   global_step = num_data * epoch + step
-      #   writer.add_scalar("eval_loss", scalar_value=eval_loss.item(), global_step=global_step)
-
-    # Save a checkpoint for every 10 epochs
-    if epoch % 10 == 0 or epoch == config.training.epochs - 1:
+    # Evaluation
+    eval_loss_mean = 0.0
+    for step, batch in enumerate(eval_dl, start=1):
+      eval_batch = scaler(batch.to(config.device))
+      eval_loss = eval_step_fn(state, eval_batch)
+      # logging.info("step: %d, eval_loss: %.5e" % (step, eval_loss.item()))
+      # global_step = num_data * epoch + step
+      # writer.add_scalar("eval_loss", scalar_value=eval_loss.item(), global_step=global_step)
+      eval_loss_mean += eval_loss.item()
+    eval_loss_mean /= step
+    logging.info("epoch: %d, eval_loss_mean: %.5e" % (epoch, eval_loss_mean))
+    writer.add_scalar("eval_loss", scalar_value=eval_loss.item(), global_step=global_step)
+    
+    # Save a checkpoint for every 5 epochs
+    if epoch % 5 == 0 or epoch == config.training.epochs - 1:
       save_checkpoint(checkpoint_dir, state, name=f'checkpoint_{epoch}.pth')
-
-    # Generate and save samples for every 10 epoch
-    if config.training.snapshot_sampling and (epoch % 10 == 0 or epoch == config.training.epochs - 1):
+    # Generate and save samples for every 5 epoch
+    if config.training.snapshot_sampling and (epoch % 5 == 0 or epoch == config.training.epochs - 1):
       print('sampling')
       ema.store(score_model.parameters())
       ema.copy_to(score_model.parameters())

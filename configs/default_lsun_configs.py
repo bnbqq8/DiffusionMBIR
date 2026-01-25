@@ -10,7 +10,7 @@ def get_default_configs():
     # config.training.batch_size = 2  # seriously?
     config.training.batch_size = 1  # When using single GPU
     # training.n_iters = 2400001
-    training.epochs = 100
+    training.epochs = 21
     training.snapshot_freq = 50000
     # training.log_freq = 50
     training.log_freq = 25

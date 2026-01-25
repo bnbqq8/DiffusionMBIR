@@ -13,7 +13,7 @@
             "env": {
                 "TORCH_CUDA_ARCH_LIST": "8.9"
             },
-            "args": "--config=configs/ve/IXI_256_ncsnpp_continuous.py --mode='train'  --workdir=workdir/IXI256 --config.data.orientation=SAG --config.data.seq=T2"
+            "args": "--config=configs/ve/IXI_256_ncsnpp_continuous.py --mode='train'  --workdir=workdir/IXI256 --config.data.orientation=AX --config.data.seq=T1"
         }
     ]
 }

@@ -16,6 +16,7 @@
 # pylint: skip-file
 """Return training and evaluation/test datasets from config files."""
 import numpy as np
+from cv2 import transform
 from httpx import get
 from torch.utils.data import DataLoader, Dataset
 
@@ -414,9 +415,10 @@ def get_IXI_dataset(config, train_val):
     import lmdb
     import torch
     from torchvision.transforms import RandomCrop
+    from torchvision.transforms.v2 import CenterCrop
 
     class MultiVolumeLMDBDataset(Dataset):
-        def __init__(self, lmdb_path, patients, transform=None):
+        def __init__(self, lmdb_path, patients, transform=None, hcp=False):
             self.lmdb_path = str(lmdb_path)
             self.transform = transform
 
@@ -434,8 +436,12 @@ def get_IXI_dataset(config, train_val):
                 for key, _ in cursor:
                     key_str = key.decode("ascii")
                     # 过滤掉不在指定患者列表中的切片
-                    if key_str.split("_")[0] not in patients:
-                        continue
+                    if hcp:
+                        if int(key_str.split("_")[0]) not in patients:
+                            continue
+                    else:
+                        if key_str.split("_")[0] not in patients:
+                            continue
                     # 过滤掉存储 shape 的 key，只保留存储 image 的主 key
                     if not key_str.endswith("_shape"):
                         self.keys.append(key)
@@ -488,18 +494,31 @@ def get_IXI_dataset(config, train_val):
 
             return img
 
-    # transforms
-    if config.data.orientation == "AX":
-        transform = None
-    else:
-        transform = RandomCrop(size=(256, 64))
     with open(config.data.json, "r") as f:
         datalist = json.load(f)
-    patients = [i.split("/")[-1] for i in datalist[train_val]]
     seq = config.data.seq
     orientation = config.data.orientation
-    lmdb_path = Path(f"../IXI_dataset/IXI_dataset_slices/{seq}_{orientation}.lmdb")
-    return MultiVolumeLMDBDataset(lmdb_path, patients, transform=transform)
+
+    if not config.data.hcp:
+        # for IXI dataset
+
+        # transforms
+        if config.data.orientation == "AX":
+            transform = None
+        else:
+            transform = RandomCrop(size=(256, 64))
+
+        patients = [i.split("/")[-1] for i in datalist[train_val]]
+        lmdb_path = Path(f"../IXI_dataset/IXI_dataset_slices/{seq}_{orientation}.lmdb")
+    else:
+        # for HCP dataset
+        transform = CenterCrop(size=(config.data.image_size, config.data.image_size))
+        patients = datalist[train_val]
+        lmdb_path = Path(f"../IXI_dataset/hcp_lmdb/{seq}_{orientation}.lmdb")
+
+    return MultiVolumeLMDBDataset(
+        lmdb_path, patients, transform=transform, hcp=config.data.hcp
+    )
 
 
 def create_dataloader(configs, evaluation=False, sort=True):

@@ -36,6 +36,7 @@ flags.mark_flags_as_required(["workdir", "config", "mode"])
 
 def main(argv):
   FLAGS.workdir = FLAGS.workdir+f"_{FLAGS.config.data.seq}_{FLAGS.config.data.orientation}"
+  print("工作目录:", FLAGS.workdir)
   print(FLAGS.config)
   if FLAGS.mode == "train" or FLAGS.mode == "train_regression":
     # Create the working directory
@@ -60,4 +61,5 @@ def main(argv):
 
 
 if __name__ == "__main__":
+  # os.environ["TORCH_CUDA_ARCH_LIST"] = "8.9"
   app.run(main)

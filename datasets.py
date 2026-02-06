@@ -351,79 +351,27 @@ class fastmri_knee_magpha_infer(Dataset):
         return data, str(fname)
 
 
-# def get_IXI_dataset(config, train_val):
-#     """Simple pytorch dataset for fastmri knee singlecoil dataset"""
-#     import json
-#     import os.path as osp
-
-#     from monai.data import CacheDataset, GridPatchDataset, PatchIter, ShuffleBuffer
-#     from monai.transforms import (
-#         Compose,
-#         EnsureChannelFirst,
-#         LoadImage,
-#         ResizeWithPadOrCrop,
-#         ScaleIntensityRangePercentiles,
-#         SqueezeDim,
-#     )
-
-#     patch_size = (1, None, None) if config.seq == "T1" else (None, None, 1)
-#     assert train_val in ["train", "val"], "train_val must be 'train' or 'val'"
-#     with open(config.json, "r") as f:
-#         datalist = json.load(f)
-#     data_list = [osp.join(x, f"{config.seq}_gt.nii.gz") for x in datalist[train_val]]
-
-#     transforms = Compose(
-#         [
-#             LoadImage(),
-#             EnsureChannelFirst(),
-#             ScaleIntensityRangePercentiles(
-#                 lower=0.05, upper=99.9, b_min=0.0, b_max=1.0, clip=False
-#             ),
-#         ]
-#     )
-#     volume_ds = CacheDataset(
-#         data=data_list,
-#         transform=transforms,
-#         cache_rate=1.0,
-#         num_workers=1,
-#     )
-#     patch_func = PatchIter(
-#         patch_size=patch_size,
-#         start_pos=(0, 0, 0),  # dynamic first two dimensions
-#     )
-#     patch_transform = Compose(
-#         [
-#             SqueezeDim(dim=1 if config.seq == "T1" else 3),
-#             ResizeWithPadOrCrop(
-#                 spatial_size=[config.data.image_size, config.data.image_size]
-#             ),
-#         ]
-#     )
-#     patch_ds = GridPatchDataset(
-#         data=volume_ds,
-#         patch_iter=patch_func,
-#         transform=patch_transform,
-#         with_coordinates=False,
-#     )
-#     shuffle_ds = ShuffleBuffer(patch_ds, buffer_size=256, seed=0)
-
-
 # v2 12/20/2025
-def get_IXI_dataset(config, train_val):
+# 将此函数替换到 datasets.py 中
+def get_CTSpine1K_dataset(config, train_val):
     import json
-
     import lmdb
     import torch
-    from torchvision.transforms import RandomCrop
-    from torchvision.transforms.v2 import CenterCrop
+    import numpy as np
+    from pathlib import Path
+    from torch.utils.data import Dataset
 
     class MultiVolumeLMDBDataset(Dataset):
-        def __init__(self, lmdb_path, patients, transform=None, hcp=False):
+        def __init__(self, lmdb_path, patients_list=None, transform=None):
             self.lmdb_path = str(lmdb_path)
             self.transform = transform
-
-            # 1. 预先扫描数据库，建立索引列表
             self.keys = []
+            
+            # 将 patients_list 转为 set 提高查询速度
+            target_patients = set(patients_list) if patients_list else None
+            
+            print(f"Scanning LMDB: {self.lmdb_path} ...")
+            # 预先扫描数据库，建立符合 dataset_split 的索引
             env = lmdb.open(
                 self.lmdb_path,
                 readonly=True,
@@ -435,17 +383,24 @@ def get_IXI_dataset(config, train_val):
                 cursor = txn.cursor()
                 for key, _ in cursor:
                     key_str = key.decode("ascii")
-                    # 过滤掉不在指定患者列表中的切片
-                    if hcp:
-                        if int(key_str.split("_")[0]) not in patients:
+                    
+                    # 1. 跳过存储 shape 的辅助键
+                    if key_str.endswith("_shape"):
+                        continue
+                    
+                    # 2. 提取 Patient ID (格式: PatientID_SliceID)
+                    # 例如: volume-covid19-A-0215_ct_001 -> volume-covid19-A-0215_ct
+                    # 使用 rsplit 确保只切分最后一个下划线
+                    pid = key_str.rsplit("_", 1)[0]
+                    
+                    # 3. 筛选逻辑：只保留 info.json 中存在的病人
+                    if target_patients is not None:
+                        if pid not in target_patients:
                             continue
-                    else:
-                        if key_str.split("_")[0] not in patients:
-                            continue
-                    # 过滤掉存储 shape 的 key，只保留存储 image 的主 key
-                    if not key_str.endswith("_shape"):
-                        self.keys.append(key)
+                            
+                    self.keys.append(key_str)
             env.close()
+            print(f"Dataset loaded. Found {len(self.keys)} slices for {train_val}.")
 
             self.env = None
             self.txn = None
@@ -468,56 +423,55 @@ def get_IXI_dataset(config, train_val):
             if self.env is None:
                 self._init_db()
 
-            key = self.keys[index]
-            shape_key = key + b"_shape"
+            # 获取当前样本的 Key (string -> bytes)
+            key_str = self.keys[index]
+            key_bytes = key_str.encode('ascii')
+            shape_key_bytes = (key_str + "_shape").encode('ascii')
 
-            # 1. 读取像素数据
-            byte_data = self.txn.get(key)
-            # 2. 读取 Shape 数据
-            shape_data = self.txn.get(shape_key)
+            # 1. 读取数据
+            byte_data = self.txn.get(key_bytes)
+            shape_data = self.txn.get(shape_key_bytes)
 
-            # 3. 反序列化
-            # 注意：dtype 必须与你写入时一致（np.float32 或 np.uint8）
-            shape = np.frombuffer(shape_data, dtype=np.int32)
-            img = (
-                np.frombuffer(byte_data, dtype=np.float32).reshape(tuple(shape)).copy()
-            )
+            # 2. 反序列化与形状还原
+            if shape_data:
+                shape = np.frombuffer(shape_data, dtype=np.int32)
+                img = np.frombuffer(byte_data, dtype=np.float32).reshape(tuple(shape)).copy()
+            else:
+                # 容错：如果没有 shape key，尝试按正方形 reshape
+                flat_data = np.frombuffer(byte_data, dtype=np.float32)
+                size = int(np.sqrt(len(flat_data)))
+                img = flat_data.reshape((size, size)).copy()
 
-            # 4. 转换为 Tensor 并进行必要的预处理
-            # 此时 img 的 shape 是 (H, W)，需要增加通道维 (1, H, W)
+            # 3. 增加 Channel 维度: (H, W) -> (1, H, W)
             img = torch.from_numpy(img).unsqueeze(0)
 
-            # 5. Diffusion 训练必须的 Resize/Crop
-            # 因为不同 volume 尺寸不同，这里必须统一到训练分辨率（如 512x512）
+            # 4. 数据增强 (如果定义了 transform)
             if self.transform:
                 img = self.transform(img)
 
             return img
 
+    # --- 配置读取 ---
+    # 读取 dataset_split.json
     with open(config.data.json, "r") as f:
         datalist = json.load(f)
-    seq = config.data.seq
-    orientation = config.data.orientation
+    
+    # 获取对应 split 的病人列表 (train 或 validation)
+    patients = datalist[train_val]
+    
+    # 构造 LMDB 完整路径
+    # 例如: /home/public/CTSpine1K/data/data_lmdb/CT_AX.lmdb
+    lmdb_root = Path(config.data.root)
+    lmdb_filename = f"{config.data.seq}_{config.data.orientation}.lmdb"
+    lmdb_path = lmdb_root / lmdb_filename
 
-    if not config.data.hcp:
-        # for IXI dataset
-
-        # transforms
-        if config.data.orientation == "AX":
-            transform = None
-        else:
-            transform = RandomCrop(size=(256, 64))
-
-        patients = [i.split("/")[-1] for i in datalist[train_val]]
-        lmdb_path = Path(f"../IXI_dataset/IXI_dataset_slices/{seq}_{orientation}.lmdb")
-    else:
-        # for HCP dataset
-        transform = CenterCrop(size=(config.data.image_size, config.data.image_size))
-        patients = datalist[train_val]
-        lmdb_path = Path(f"../IXI_dataset/hcp_lmdb/{seq}_{orientation}.lmdb")
+    # CT数据已归一化且尺寸统一，通常不需要额外的 CenterCrop
+    transform = None 
 
     return MultiVolumeLMDBDataset(
-        lmdb_path, patients, transform=transform, hcp=config.data.hcp
+        lmdb_path=lmdb_path, 
+        patients_list=patients, 
+        transform=transform
     )
 
 
@@ -566,9 +520,9 @@ def create_dataloader(configs, evaluation=False, sort=True):
         val_dataset = fastmri_knee_infer(
             Path(configs.data.root) / f"knee_{configs.data.image_size}_val", sort=sort
         )
-    elif configs.data.dataset == "IXI":
-        train_dataset = get_IXI_dataset(configs, "train")
-        val_dataset = get_IXI_dataset(configs, "validation")
+    elif configs.data.dataset == "CTSpine1K":
+        train_dataset = get_CTSpine1K_dataset(configs, "train")
+        val_dataset = get_CTSpine1K_dataset(configs, "validation")
     else:
         raise ValueError(f"Dataset {configs.data.dataset} not recognized.")
 

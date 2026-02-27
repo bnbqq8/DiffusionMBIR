@@ -166,7 +166,7 @@ def train(config, workdir):
     if epoch % 5 == 0 or epoch == config.training.epochs - 1:
       save_checkpoint(checkpoint_dir, state, name=f'checkpoint_{epoch}.pth')
     # Generate and save samples for every 5 epoch
-    if config.training.snapshot_sampling and (epoch % 5 == 0 or epoch == config.training.epochs - 1):
+    if config.training.snapshot_sampling and (epoch % 1 == 0 or epoch == config.training.epochs - 1):
       print('sampling')
       ema.store(score_model.parameters())
       ema.copy_to(score_model.parameters())

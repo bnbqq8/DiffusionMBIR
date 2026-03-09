@@ -163,7 +163,7 @@ def train(config, workdir):
     writer.add_scalar("eval_loss", scalar_value=eval_loss.item(), global_step=global_step)
     
     # Save a checkpoint for every 5 epochs
-    if epoch % 5 == 0 or epoch == config.training.epochs - 1:
+    if epoch == config.training.epochs - 1:
       save_checkpoint(checkpoint_dir, state, name=f'checkpoint_{epoch}.pth')
     # Generate and save samples for every 5 epoch
     if config.training.snapshot_sampling and (epoch % 1 == 0 or epoch == config.training.epochs - 1):

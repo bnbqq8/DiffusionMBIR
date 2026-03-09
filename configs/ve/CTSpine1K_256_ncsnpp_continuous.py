@@ -10,10 +10,10 @@ def get_config():
     
     data.dataset = "CTSpine1K"  # 这里必须与 datasets.py 中的判断字符串一致
     
-    data.json = "/home/public/CTSpine1K/data/dataset_split.json"
-    data.root = "/home/public/CTSpine1K/data/data_lmdb/"
+    data.json = "/root/epfs/dataset_split.json"
+    data.root = "/root/epfs/data_lmdb_seg/"
     data.seq = "CT"
-    data.orientation = "AX"
+    data.orientation = "SAG"
     data.hcp = False
 
     return config

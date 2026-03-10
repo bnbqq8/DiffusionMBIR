@@ -477,13 +477,16 @@ def get_CTSpine1K_dataset(config, train_val):
 
 def create_dataloader(configs, evaluation=False, sort=True):
     shuffle = True if not evaluation else False
-    if configs.data.dataset == "Object5":
+    dataset_name = str(configs.data.dataset).strip()
+    dataset_name_lower = dataset_name.lower()
+
+    if dataset_name_lower == "object5":
         train_dataset = Object5(Path(configs.data.root), slice(None, 1800))
         val_dataset = Object5(Path(configs.data.root), slice(1800, None))
-    elif configs.data.dataset == "Object5Fast":
+    elif dataset_name_lower == "object5fast":
         train_dataset = Object5(Path(configs.data.root), slice(None, 1), fast=True)
         val_dataset = Object5(Path(configs.data.root), slice(1, 2), fast=True)
-    elif configs.data.dataset == "AAPM":
+    elif dataset_name_lower == "aapm":
         train_dataset = AAPM(Path(configs.data.root) / f"train", sort=False)
         val_dataset = AAPM(Path(configs.data.root) / f"test", sort=True)
     elif configs.data.is_multi:
@@ -513,18 +516,21 @@ def create_dataloader(configs, evaluation=False, sort=True):
                 Path(configs.data.root) / f"knee_complex_{configs.data.image_size}_val",
                 is_complex=True,
             )
-    elif configs.data.dataset == "fastmri_knee":
+    elif dataset_name_lower == "fastmri_knee":
         train_dataset = fastmri_knee(
             Path(configs.data.root) / f"knee_{configs.data.image_size}_train"
         )
         val_dataset = fastmri_knee_infer(
             Path(configs.data.root) / f"knee_{configs.data.image_size}_val", sort=sort
         )
-    elif configs.data.dataset == "CTSpine1K":
+    elif dataset_name_lower == "ctspine1k":
         train_dataset = get_CTSpine1K_dataset(configs, "train")
         val_dataset = get_CTSpine1K_dataset(configs, "validation")
     else:
-        raise ValueError(f"Dataset {configs.data.dataset} not recognized.")
+        supported = ["Object5", "Object5Fast", "AAPM", "fastmri_knee", "CTSpine1K"]
+        raise ValueError(
+            f"Dataset '{dataset_name}' not recognized. Supported datasets: {supported}"
+        )
 
     train_loader = DataLoader(
         dataset=train_dataset,

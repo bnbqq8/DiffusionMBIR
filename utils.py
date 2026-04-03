@@ -29,7 +29,7 @@ def clear(x, normalize=True):
 def restore_checkpoint(ckpt_dir, state, device, skip_sigma=False, skip_optimizer=False):
     ckpt_dir = Path(ckpt_dir)
     # import ipdb; ipdb.set_trace()
-    ckpt = ckpt_dir / "latest.pth"
+    ckpt = ckpt_dir  # / "latest.pth"
     if not ckpt.exists():
         logging.warning(
             f"No checkpoint found at {ckpt_dir}. " f"Returned the same state as input"

@@ -319,7 +319,7 @@ class LangevinCorrectorCS(Corrector):
             )
 
     def update_fn(self, x, t, y, discrete_sigmas):
-        """
+        r"""
         Args:
           x: current estimate x_i
           t: current time step

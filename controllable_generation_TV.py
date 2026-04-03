@@ -182,7 +182,7 @@ def get_pc_radon_ADMM_TV(
         return radon.A(x)
 
     def _AT(sinogram):
-        return radon.AT(sinogram)
+        return radon.AT(sinogram, img_shape)
 
     def kaczmarz(x, x_mean, measurement=None, lamb=1.0, i=None, norm_const=None):
         x = x + lamb * _AT(measurement - _A(x)) / norm_const
@@ -336,7 +336,7 @@ def get_pc_radon_ADMM_TV_vol(
         return radon.A(x)
 
     def _AT(sinogram):
-        return radon.AT(sinogram)
+        return radon.AT(sinogram, img_shape)
 
     def kaczmarz(x, x_mean, measurement=None, lamb=1.0, i=None, norm_const=None):
         x = x + lamb * _AT(measurement - _A(x)) / norm_const
@@ -534,7 +534,7 @@ def get_pc_SR_ADMM_TV_vol(
 
     def A_cg(x):
         # return _AT(_A(x)) + rho * _DzT(_Dz(x))
-        return _AT(_A(x)) + rho * _DzT_nonperiodic(_Dz_nonperiodic(x))
+        return _AT(_A(x), x.shape) + rho * _DzT_nonperiodic(_Dz_nonperiodic(x))
 
     def CG(A_fn, b_cg, x, n_inner=10):
         r = b_cg - A_fn(x)
@@ -584,7 +584,7 @@ def get_pc_SR_ADMM_TV_vol(
     def get_ADMM_TV_fn(niter, n_inner):
         def ADMM_TV_fn(x, measurement=None):
             with torch.no_grad():
-                ATy = _AT(measurement)
+                ATy = _AT(measurement, x.shape)
                 x, x_mean = CS_routine(x, ATy, niter=niter, n_inner=n_inner)
                 return x, x_mean
 
@@ -644,7 +644,7 @@ def get_pc_SR_ADMM_TV_vol(
 
             return inverse_scaler(x_mean if denoise else x)
 
-    return pc_radon, _AT
+    return pc_radon, lambda y: _AT(y, img_shape)
 
 
 def get_pc_SR_ADMM_TV_MIND_vol(
